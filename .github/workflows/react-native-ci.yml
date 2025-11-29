@@ -1,16 +1,22 @@
-name: React Native CI/CD (Dummy Public Repo)
+name: React Native CI/CD
 
 on:
+  push:
+    branches: [main, master]
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - 'docs/**'
+  pull_request:
+    branches: [main, master]
   workflow_dispatch:
     inputs:
       buildType:
         type: choice
-        description: "Build type to run"
+        description: 'Build type to run'
         options:
           - ios
           - all
-  push:
-    branches: [main, master]
 
 permissions:
   contents: write
@@ -22,144 +28,349 @@ env:
   EXPO_APPLE_PASSWORD: ${{ secrets.EXPO_APPLE_PASSWORD }}
   EXPO_TEAM_ID: ${{ secrets.EXPO_TEAM_ID }}
   NODE_OPTIONS: --openssl-legacy-provider --max_old_space_size=4096
+  # Note: REVENUECAT_API_KEY is loaded from GitHub secrets
+  # It's used to create .env file for local EAS builds
 
 jobs:
-  checkout-private:
+  check-skip:
     runs-on: ubuntu-latest
-    outputs:
-      sha: ${{ steps.commit.outputs.sha }}
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
     steps:
-      - name: Checkout PRIVATE repo (source code)
+      - name: Skip CI check
+        run: echo "Proceeding with workflow"
+
+  # Quality Checks
+  quality-checks:
+    needs: check-skip
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: private
+    steps:
+      - name: Checkout PRIVATE repo code
         uses: actions/checkout@v4
         with:
-          repository: YOUR_USERNAME/YOUR_PRIVATE_REPO
+          repository: aakarshsasi/velvet
           token: ${{ secrets.PRIVATE_REPO_PAT }}
           path: private
-
-      - name: Capture commit SHA
-        id: commit
-        run: echo "sha=$(cd private && git rev-parse HEAD)" >> $GITHUB_OUTPUT
-
-  quality-checks:
-    needs: checkout-private
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Use private repo code
-        run: |
-          ls -la
-          cd private
-          ls -la
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
-          cache: "npm"
+          node-version: '20'
+          cache: 'npm'
           cache-dependency-path: private/package-lock.json
 
       - name: Install dependencies
-        run: |
-          cd private
-          npm ci
+        run: npm ci
 
-      - name: Verify structure
+      - name: Verify project structure
         run: |
-          cd private
-          echo "Verifying src and app folders"
+          echo "Checking project structure..."
+          echo "App directory contents:"
           ls -la app/
+          echo "Src directory contents:"
           ls -la src/
+          echo "Package.json main entry:"
+          cat package.json | grep '"main"'
 
       - name: TypeScript check
-        run: |
-          cd private
-          npx tsc --noEmit
+        run: npx tsc --noEmit
 
       - name: ESLint check
-        run: |
-          cd private
-          npx expo lint --max-warnings 100
+        run: npx expo lint --max-warnings 100
 
-      - name: Prettier check
-        run: |
-          cd private
-          npx prettier --check "**/*.{js,jsx,ts,tsx,json,md}" || true
+      - name: Prettier format check
+        run: npx prettier --check "**/*.{js,jsx,ts,tsx,json,md}" || echo "Prettier formatting issues found - continuing build"
 
-      - name: Test bundling
+      - name: Test bundling (Quality Check)
         run: |
-          cd private
-          npx expo export --platform ios --output-dir ./quality-test-bundle
+          echo "Testing bundling in quality checks..."
+          npx expo export --platform ios --output-dir ./quality-test-bundle || {
+            echo "Bundling failed in quality checks - this indicates a code issue"
+            exit 1
+          }
+          echo "Bundling test passed in quality checks!"
 
+  # iOS Build (Local - No EAS Minutes Used)
   ios-build:
-    needs: quality-checks
     runs-on: macos-latest
-    if: >
-      (github.event_name == 'push') ||
-      (github.event_name == 'workflow_dispatch' &&
-      (github.event.inputs.buildType == 'ios' || github.event.inputs.buildType == 'all'))
-
-    env:
-      REVENUECAT_API_KEY: ${{ secrets.REVENUECAT_API_KEY }}
-
+    needs: quality-checks
+    defaults:
+      run:
+        working-directory: private
+    if: (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.buildType == 'ios' || github.event.inputs.buildType == 'all'))
     steps:
-      - name: Checkout private repo
+      - name: Checkout PRIVATE repo code
         uses: actions/checkout@v4
         with:
-          repository: YOUR_USERNAME/YOUR_PRIVATE_REPO
+          repository: aakarshsasi/velvet
           token: ${{ secrets.PRIVATE_REPO_PAT }}
           path: private
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
-          cache: "npm"
+          node-version: '20'
+          cache: 'npm'
           cache-dependency-path: private/package-lock.json
 
       - name: Install dependencies
-        run: |
-          cd private
-          npm ci
+        run: npm ci
 
-      - name: Install EAS CLI
+      - name: Setup EAS CLI
         run: npm install -g eas-cli
 
-      - name: Clear EAS cache
+      - name: Clear EAS Build Cache
         run: |
+          echo "Clearing EAS build cache..."
           rm -rf ~/.eas-build-local || true
           rm -rf ~/.expo || true
+          eas build:clear-cache || true
+          echo "EAS cache cleared"
 
       - name: Login to EAS
         run: |
-          eas whoami || exit 1
+          echo "EXPO_TOKEN is set: $([[ -n "$EXPO_TOKEN" ]] && echo "yes" || echo "no")"
+          eas whoami || (echo "❌ EAS login failed! Check EXPO_TOKEN secret" && exit 1)
+          echo "✅ EAS login successful"
 
       - name: Setup iOS build environment
         run: |
+          # Check if xcode-select is configured, install if needed
+          xcode-select -p || xcode-select --install || true
+          # Install CocoaPods
           sudo gem install cocoapods
+          echo "✅ iOS build environment ready"
 
-      - name: Setup RevenueCat env
+      - name: Setup RevenueCat .env and EAS env
         run: |
-          cd private
+          echo "🔐 Setting up RevenueCat API key for EAS build..."
+          
+          # Check if secret is available
+          if [ -z "${{ secrets.REVENUECAT_API_KEY }}" ]; then
+            echo "❌ ERROR: REVENUECAT_API_KEY secret is not set in GitHub!"
+            exit 1
+          fi
+          
+          # Create .env file for Metro bundler
           echo "REVENUECAT_API_KEY=${{ secrets.REVENUECAT_API_KEY }}" > .env
+          echo "✅ Created .env file"
+          
+          # Verify .env file contents
+          echo "📄 .env file contents:"
+          cat .env
+          echo ""
+          
+          # Verify API key format
+          API_KEY_LENGTH=$(echo "${{ secrets.REVENUECAT_API_KEY }}" | wc -c)
+          echo "🔑 API Key length: $API_KEY_LENGTH characters"
+          echo "🔑 API Key starts with: $(echo "${{ secrets.REVENUECAT_API_KEY }}" | cut -c1-5)"
+          
+          # Set environment variable for EAS build
+          echo "REVENUECAT_API_KEY=${{ secrets.REVENUECAT_API_KEY }}" >> $GITHUB_ENV
+          echo "✅ EAS environment variable set"
 
-      - name: Test bundling again
+      - name: Configure Firebase iOS plist
+        env:
+          IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64: ${{ secrets.IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64 }}
         run: |
-          cd private
-          npx expo export --platform ios --output-dir ./test-bundle
+          if [ -z "$IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64" ]; then
+            echo "❌ ERROR: IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64 secret is not set in GitHub!"
+            exit 1
+          fi
 
-      - name: Extract build number
-        id: buildnumber
-        run: |
-          cd private
-          echo "build=$(jq -r '.expo.ios.buildNumber' app.json)" >> $GITHUB_OUTPUT
+          echo "📄 Decoding GoogleService-Info.plist from secret..."
+          mkdir -p ios/velvet
+          echo "$IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64" | base64 --decode > ios/velvet/GoogleService-Info.plist
+          plutil -lint ios/velvet/GoogleService-Info.plist
+          echo "✅ GoogleService-Info.plist written to ios/velvet/"
 
-      - name: Build iOS IPA (local)
+      - name: Build iOS Production
         run: |
-          cd private
-          BUILD=${{ steps.buildnumber.outputs.build }}
-          eas build --platform ios --profile production --local             --output=../app-ios-${BUILD}.ipa --non-interactive
+          export NODE_OPTIONS="--openssl-legacy-provider --max_old_space_size=4096"
+          echo "Starting iOS build..."
+          echo "Node version: $(node --version)"
+          echo "NPM version: $(npm --version)"
+          echo "EAS CLI version: $(eas --version)"
+          echo "Current directory: $(pwd)"
+          echo "Files in current directory: $(ls -la)"
+          echo "Checking app.json build number:"
+          cat app.json | grep -A 5 -B 5 "buildNumber"
+          
+          echo ""
+          echo "🔍 VERIFYING .env FILE BEFORE BUILD:"
+          echo "=================================="
+          if [ -f .env ]; then
+            echo "✅ .env file exists"
+            echo "📄 .env file contents (masked):"
+            cat .env | sed 's/\(.\{20\}\).*/\1***/' || echo "Cannot read .env"
+            
+            # Check if REVENUECAT_API_KEY is in .env
+            if grep -q "REVENUECAT_API_KEY" .env; then
+              echo "✅ REVENUECAT_API_KEY found in .env"
+              API_KEY_VALUE=$(grep REVENUECAT_API_KEY .env | cut -d'=' -f2)
+              echo "   Key length: ${#API_KEY_VALUE} characters"
+              echo "   Key starts with: ${API_KEY_VALUE:0:5}"
+              echo "   Key ends with: ${API_KEY_VALUE: -10}"
+              echo "   Full key value: ${API_KEY_VALUE}"
+            else
+              echo "❌ REVENUECAT_API_KEY NOT FOUND in .env"
+              exit 1
+            fi
+          else
+            echo "❌ .env file NOT FOUND!"
+            exit 1
+          fi
+          
+          echo ""
+          echo "🔍 VERIFYING ENVIRONMENT VARIABLE:"
+          echo "================================="
+          if [ -n "$REVENUECAT_API_KEY" ]; then
+            echo "✅ REVENUECAT_API_KEY environment variable is set"
+            echo "   Length: ${#REVENUECAT_API_KEY} characters"
+            echo "   Starts with: ${REVENUECAT_API_KEY:0:5}"
+            echo "   Ends with: ${REVENUECAT_API_KEY: -10}"
+            echo "   Full env value: ${REVENUECAT_API_KEY}"
+          else
+            echo "❌ REVENUECAT_API_KEY environment variable NOT SET"
+          fi
 
-      - name: Upload to Releases
+          # Test bundling first
+          echo "Testing bundling..."
+          npx expo export --platform ios --output-dir ./test-bundle || {
+            echo "Bundling test failed - this will help identify the issue"
+            exit 1
+          }
+          echo "Bundling test passed!"
+
+          # Extract build number from app.json using jq (safer for nested JSON)
+          BUILD_NUMBER=$(jq -r '.expo.ios.buildNumber' app.json)
+          if [ -z "$BUILD_NUMBER" ] || [ "$BUILD_NUMBER" = "null" ]; then
+            echo "⚠️ Build number not found in app.json, using fallback"
+            BUILD_NUMBER=$(cat app.json | grep -o '"buildNumber": "[^"]*"' | cut -d'"' -f4 || echo "1")
+          fi
+          echo "Building with build number: $BUILD_NUMBER"
+
+          # Now run the actual build with build-specific filename
+          echo "Starting EAS build..."
+          export REVENUECAT_API_KEY
+          echo "REVENUECAT_API_KEY=$REVENUECAT_API_KEY" >> $GITHUB_ENV
+          eas build --platform ios --profile production --local --non-interactive --output=./app-ios-build-${BUILD_NUMBER}.ipa || {
+            echo "EAS build failed - check the logs above for details"
+            exit 1
+          }
+          echo "iOS build completed successfully!"
+          echo "Verifying build number in generated IPA:"
+          echo "IPA file size: $(ls -lh ./app-ios-build-${BUILD_NUMBER}.ipa)"
+          echo "Checking if IPA contains correct build number..."
+        env:
+          NODE_ENV: production
+          REVENUECAT_API_KEY: ${{ secrets.REVENUECAT_API_KEY }}
+
+      - name: Submit to App Store (TestFlight)
         run: |
-          BUILD=${{ steps.buildnumber.outputs.build }}
-          gh release create v${{ github.run_number }}             ./app-ios-${BUILD}.ipa             --title "Build v${{ github.run_number }}"             --notes "Automatic build from private repo"
+          # Extract build number for submission using jq
+          BUILD_NUMBER=$(jq -r '.expo.ios.buildNumber' app.json || echo "1")
+          IPA_FILE="./app-ios-build-${BUILD_NUMBER}.ipa"
+          echo "Attempting TestFlight submission of build $BUILD_NUMBER..."
+          echo "IPA file: $IPA_FILE"
+          echo "Note: EAS Submit may be experiencing outages - check https://status.expo.dev/"
+          eas submit -p ios --path $IPA_FILE --non-interactive || {
+            echo "TestFlight submission failed - this may be due to EAS Submit outage"
+            echo "Build completed successfully - you can manually submit later"
+            echo "Check EAS Submit status: https://status.expo.dev/"
+          }
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Upload iOS build to GitHub Releases
+        run: |
+          # Extract build number for release upload using jq
+          BUILD_NUMBER=$(jq -r '.expo.ios.buildNumber' app.json || echo "1")
+          IPA_FILE="./app-ios-build-${BUILD_NUMBER}.ipa"
+          echo "Uploading build $BUILD_NUMBER to GitHub Releases..."
+          echo "IPA file: $IPA_FILE"
+
+          gh release create v${{ github.run_number }} \
+            --title "Release v${{ github.run_number }}" \
+            --notes "## Velvet App Build v${{ github.run_number }}
+            
+            ### Changes
+            - Automated build from commit ${{ github.sha }}
+            - Built on: ${{ github.event.head_commit.timestamp }}
+            - Build Number: $BUILD_NUMBER
+            
+            ### Downloads
+            - **iOS Build**: app-ios-build-${BUILD_NUMBER}.ipa (Build Number: $BUILD_NUMBER)
+            
+            ### Installation
+            - iOS: Available in TestFlight automatically
+            - Android: Build paused (can be re-enabled later)" \
+            $IPA_FILE
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Android Build (Local - No EAS Minutes Used) - PAUSED
+  # android-build:
+  #   runs-on: ubuntu-latest
+  #   needs: [quality-checks, create-release]
+  #   if: (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.buildType == 'android' || github.event.inputs.buildType == 'all'))
+  #   defaults:
+  #     run:
+  #       working-directory: private
+  #   steps:
+  #     - name: Checkout PRIVATE repo code
+  #       uses: actions/checkout@v4
+  #       with:
+  #         repository: aakarshsasi/velvet
+  #         token: ${{ secrets.PRIVATE_REPO_PAT }}
+  #         path: private
+  #
+  #     - name: Setup Node.js
+  #       uses: actions/setup-node@v4
+  #       with:
+  #         node-version: "20"
+  #         cache: 'npm'
+  #         cache-dependency-path: private/package-lock.json
+  #
+  #     - name: Install dependencies
+  #       run: npm ci
+  #
+  #     - name: Setup EAS CLI
+  #       run: npm install -g eas-cli
+  #
+  #     - name: Login to EAS
+  #       run: |
+  #         echo "EXPO_TOKEN is set: $([[ -n "$EXPO_TOKEN" ]] && echo "yes" || echo "no")"
+  #         eas whoami
+  #
+  #     - name: Setup Android build environment
+  #       run: |
+  #         sudo apt-get update
+  #         sudo apt-get install -y openjdk-11-jdk
+  #         wget https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip
+  #         unzip commandlinetools-linux-9477386_latest.zip
+  #         mkdir -p android-sdk/cmdline-tools
+  #         mv cmdline-tools android-sdk/cmdline-tools/latest
+  #         export ANDROID_HOME=$PWD/android-sdk
+  #         export PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
+  #         echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
+  #         echo "PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools" >> $GITHUB_ENV
+  #
+  #     - name: Build Android app locally (No EAS Minutes)
+  #       run: |
+  #         export NODE_OPTIONS="--openssl-legacy-provider --max_old_space_size=4096"
+  #         eas build --platform android --profile production --local --non-interactive --output=./velvet-android-build.aab
+  #       env:
+  #         NODE_ENV: production
+  #
+  #     - name: Upload Android build to GitHub Releases
+  #       uses: actions/upload-release-asset@v1
+  #       env:
+  #         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  #       with:
+  #         upload_url: ${{ needs.create-release.outputs.upload_url }}
+  #         asset_path: ./velvet-android-build.aab
+  #         asset_name: velvet-android-build.aab
+  #         asset_content_type: application/vnd.android.package-archive
