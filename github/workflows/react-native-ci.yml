@@ -1,0 +1,165 @@
+name: React Native CI/CD (Dummy Public Repo)
+
+on:
+  workflow_dispatch:
+    inputs:
+      buildType:
+        type: choice
+        description: "Build type to run"
+        options:
+          - ios
+          - all
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: write
+  actions: read
+
+env:
+  EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+  EXPO_APPLE_ID: ${{ secrets.EXPO_APPLE_ID }}
+  EXPO_APPLE_PASSWORD: ${{ secrets.EXPO_APPLE_PASSWORD }}
+  EXPO_TEAM_ID: ${{ secrets.EXPO_TEAM_ID }}
+  NODE_OPTIONS: --openssl-legacy-provider --max_old_space_size=4096
+
+jobs:
+  checkout-private:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      - name: Checkout PRIVATE repo (source code)
+        uses: actions/checkout@v4
+        with:
+          repository: YOUR_USERNAME/YOUR_PRIVATE_REPO
+          token: ${{ secrets.PRIVATE_REPO_PAT }}
+          path: private
+
+      - name: Capture commit SHA
+        id: commit
+        run: echo "sha=$(cd private && git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+  quality-checks:
+    needs: checkout-private
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Use private repo code
+        run: |
+          ls -la
+          cd private
+          ls -la
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: private/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          cd private
+          npm ci
+
+      - name: Verify structure
+        run: |
+          cd private
+          echo "Verifying src and app folders"
+          ls -la app/
+          ls -la src/
+
+      - name: TypeScript check
+        run: |
+          cd private
+          npx tsc --noEmit
+
+      - name: ESLint check
+        run: |
+          cd private
+          npx expo lint --max-warnings 100
+
+      - name: Prettier check
+        run: |
+          cd private
+          npx prettier --check "**/*.{js,jsx,ts,tsx,json,md}" || true
+
+      - name: Test bundling
+        run: |
+          cd private
+          npx expo export --platform ios --output-dir ./quality-test-bundle
+
+  ios-build:
+    needs: quality-checks
+    runs-on: macos-latest
+    if: >
+      (github.event_name == 'push') ||
+      (github.event_name == 'workflow_dispatch' &&
+      (github.event.inputs.buildType == 'ios' || github.event.inputs.buildType == 'all'))
+
+    env:
+      REVENUECAT_API_KEY: ${{ secrets.REVENUECAT_API_KEY }}
+
+    steps:
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: YOUR_USERNAME/YOUR_PRIVATE_REPO
+          token: ${{ secrets.PRIVATE_REPO_PAT }}
+          path: private
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: private/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          cd private
+          npm ci
+
+      - name: Install EAS CLI
+        run: npm install -g eas-cli
+
+      - name: Clear EAS cache
+        run: |
+          rm -rf ~/.eas-build-local || true
+          rm -rf ~/.expo || true
+
+      - name: Login to EAS
+        run: |
+          eas whoami || exit 1
+
+      - name: Setup iOS build environment
+        run: |
+          sudo gem install cocoapods
+
+      - name: Setup RevenueCat env
+        run: |
+          cd private
+          echo "REVENUECAT_API_KEY=${{ secrets.REVENUECAT_API_KEY }}" > .env
+
+      - name: Test bundling again
+        run: |
+          cd private
+          npx expo export --platform ios --output-dir ./test-bundle
+
+      - name: Extract build number
+        id: buildnumber
+        run: |
+          cd private
+          echo "build=$(jq -r '.expo.ios.buildNumber' app.json)" >> $GITHUB_OUTPUT
+
+      - name: Build iOS IPA (local)
+        run: |
+          cd private
+          BUILD=${{ steps.buildnumber.outputs.build }}
+          eas build --platform ios --profile production --local             --output=../app-ios-${BUILD}.ipa --non-interactive
+
+      - name: Upload to Releases
+        run: |
+          BUILD=${{ steps.buildnumber.outputs.build }}
+          gh release create v${{ github.run_number }}             ./app-ios-${BUILD}.ipa             --title "Build v${{ github.run_number }}"             --notes "Automatic build from private repo"
