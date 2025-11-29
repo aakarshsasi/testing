@@ -2,7 +2,7 @@ name: React Native CI/CD
 
 on:
   push:
-    branches: [main, master]
+    branches: [master]
     paths-ignore:
       - '**.md'
       - 'LICENSE'
@@ -285,20 +285,25 @@ jobs:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
 
       - name: Upload iOS build to GitHub Releases
+        env:
+          # Use PAT so we can create release on PRIVATE repo
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_PAT }}
         run: |
           # Extract build number for release upload using jq
           BUILD_NUMBER=$(jq -r '.expo.ios.buildNumber' app.json || echo "1")
           IPA_FILE="./app-ios-build-${BUILD_NUMBER}.ipa"
-          echo "Uploading build $BUILD_NUMBER to GitHub Releases..."
+          echo "Uploading build $BUILD_NUMBER to GitHub Releases (private repo)..."
           echo "IPA file: $IPA_FILE"
+          echo "Target repo: aakarshsasi/velvet"
 
-          gh release create v${{ github.run_number }} \
+          gh release create "v${{ github.run_number }}" \
+            --repo "aakarshsasi/velvet" \
             --title "Release v${{ github.run_number }}" \
             --notes "## Velvet App Build v${{ github.run_number }}
             
             ### Changes
-            - Automated build from commit ${{ github.sha }}
-            - Built on: ${{ github.event.head_commit.timestamp }}
+            - Automated build from dummy CI repo
+            - Built from private repo commit ${{ github.sha }}
             - Build Number: $BUILD_NUMBER
             
             ### Downloads
@@ -307,9 +312,7 @@ jobs:
             ### Installation
             - iOS: Available in TestFlight automatically
             - Android: Build paused (can be re-enabled later)" \
-            $IPA_FILE
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            "$IPA_FILE"
 
   # Android Build (Local - No EAS Minutes Used) - PAUSED
   # android-build:
