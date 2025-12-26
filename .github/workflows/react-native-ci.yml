@@ -295,10 +295,25 @@ jobs:
           echo "Uploading build $BUILD_NUMBER to GitHub Releases (private repo)..."
           echo "IPA file: $IPA_FILE"
           echo "Target repo: aakarshsasi/velvet"
+          
+          TAG_NAME="v${{ github.run_number }}"
+          RELEASE_TITLE="Release v${{ github.run_number }}"
+          
+          #Check if release exists and delete it
+          if gh release view "$TAG_NAME" --repo "aakarshsasi/velvet" &>/dev/null; then
+            echo "⚠️ Release $TAG_NAME already exists. Deleting it..."
+            gh release delete "$TAG_NAME" --repo "aakarshsasi/velvet" --yes || echo "Failed to delete release"
+            
+            # Also ensure tag is deleted
+            echo "⚠️ Deleting git tag $TAG_NAME..."
+            git tag -d "$TAG_NAME" 2>/dev/null || true
+            git push origin :refs/tags/"$TAG_NAME" 2>/dev/null || true
+            echo "✅ Cleanup complete"
+          fi
 
-          gh release create "v${{ github.run_number }}" \
+          gh release create "$TAG_NAME" \
             --repo "aakarshsasi/velvet" \
-            --title "Release v${{ github.run_number }}" \
+            --title "$RELEASE_TITLE" \
             --notes "## Velvet App Build v${{ github.run_number }}
             
             ### Changes
