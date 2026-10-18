@@ -140,28 +140,18 @@ jobs:
           sudo gem install cocoapods
           echo "✅ iOS build environment ready"
 
-      - name: Setup RevenueCat .env and EAS env
+      - name: Setup RevenueCat .env
+        env:
+          REVENUECAT_API_KEY: ${{ secrets.REVENUECAT_API_KEY }}
         run: |
-          echo "🔐 Setting up RevenueCat API key for EAS build..."
-
-          if [ -z "${{ secrets.REVENUECAT_API_KEY }}" ]; then
+          set +x
+          if [ -z "$REVENUECAT_API_KEY" ]; then
             echo "❌ ERROR: REVENUECAT_API_KEY secret is not set in GitHub!"
             exit 1
           fi
-
-          echo "REVENUECAT_API_KEY=${{ secrets.REVENUECAT_API_KEY }}" > .env
+          echo "::add-mask::$REVENUECAT_API_KEY"
+          printf 'REVENUECAT_API_KEY=%s\n' "$REVENUECAT_API_KEY" > .env
           echo "✅ Created .env file"
-
-          echo "📄 .env file contents:"
-          cat .env
-          echo ""
-
-          API_KEY_LENGTH=$(echo "${{ secrets.REVENUECAT_API_KEY }}" | wc -c)
-          echo "🔑 API Key length: $API_KEY_LENGTH characters"
-          echo "🔑 API Key starts with: $(echo "${{ secrets.REVENUECAT_API_KEY }}" | cut -c1-5)"
-
-          echo "REVENUECAT_API_KEY=${{ secrets.REVENUECAT_API_KEY }}" >> $GITHUB_ENV
-          echo "✅ EAS environment variable set"
 
       - name: Configure Firebase iOS plist
         env:
@@ -190,38 +180,15 @@ jobs:
           echo "Checking app.json build number:"
           cat app.json | grep -A 5 -B 5 "buildNumber"
 
-          echo ""
-          echo "🔍 VERIFYING .env FILE BEFORE BUILD:"
-          echo "=================================="
-          if [ -f .env ]; then
-            echo "✅ .env file exists"
-            echo "📄 .env file contents (masked):"
-            cat .env | sed 's/\(.\{20\}\).*/\1***/' || echo "Cannot read .env"
-
-            if grep -q "REVENUECAT_API_KEY" .env; then
-              echo "✅ REVENUECAT_API_KEY found in .env"
-              API_KEY_VALUE=$(grep REVENUECAT_API_KEY .env | cut -d'=' -f2)
-              echo "   Key length: ${#API_KEY_VALUE} characters"
-              echo "   Key starts with: ${API_KEY_VALUE:0:5}"
-            else
-              echo "❌ REVENUECAT_API_KEY NOT FOUND in .env"
-              exit 1
-            fi
-          else
-            echo "❌ .env file NOT FOUND!"
+          if [ ! -f .env ] || ! grep -q '^REVENUECAT_API_KEY=.' .env; then
+            echo "❌ .env missing or REVENUECAT_API_KEY not set in .env"
             exit 1
           fi
-
-          echo ""
-          echo "🔍 VERIFYING ENVIRONMENT VARIABLE:"
-          echo "================================="
-          if [ -n "$REVENUECAT_API_KEY" ]; then
-            echo "✅ REVENUECAT_API_KEY environment variable is set"
-            echo "   Length: ${#REVENUECAT_API_KEY} characters"
-            echo "   Starts with: ${REVENUECAT_API_KEY:0:5}"
-          else
+          if [ -z "$REVENUECAT_API_KEY" ]; then
             echo "❌ REVENUECAT_API_KEY environment variable NOT SET"
+            exit 1
           fi
+          echo "✅ .env and REVENUECAT_API_KEY are present"
 
           echo "Testing bundling..."
           npx expo export --platform ios --output-dir ./test-bundle || {
@@ -237,8 +204,6 @@ jobs:
           fi
           echo "Building with build number: $BUILD_NUMBER"
 
-          export REVENUECAT_API_KEY
-          echo "REVENUECAT_API_KEY=$REVENUECAT_API_KEY" >> $GITHUB_ENV
           eas build --platform ios --profile production --local --non-interactive --output=./app-ios-build-${BUILD_NUMBER}.ipa || {
             echo "EAS build failed - check the logs above for details"
             exit 1
@@ -251,15 +216,16 @@ jobs:
           REVENUECAT_API_KEY: ${{ secrets.REVENUECAT_API_KEY }}
 
       - name: Submit to App Store (TestFlight)
+        id: testflight_submit
+        # Failure is recorded here and enforced in the last step, so the GitHub Release
+        # upload still runs for a successfully built IPA.
+        continue-on-error: true
         run: |
           BUILD_NUMBER=$(jq -r '.expo.ios.buildNumber' app.json || echo "1")
           IPA_FILE="./app-ios-build-${BUILD_NUMBER}.ipa"
           echo "Attempting TestFlight submission of build $BUILD_NUMBER..."
           echo "IPA file: $IPA_FILE"
-          eas submit -p ios --path $IPA_FILE --non-interactive || {
-            echo "TestFlight submission failed - check status.expo.dev"
-            echo "Build completed - you can manually submit later"
-          }
+          eas submit -p ios --path "$IPA_FILE" --non-interactive
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
 
@@ -295,6 +261,12 @@ jobs:
             ### Downloads
             - **iOS**: app-ios-build-${BUILD_NUMBER}.ipa" \
             "$IPA_FILE"
+
+      - name: Fail job if TestFlight submission failed
+        if: steps.testflight_submit.outcome == 'failure'
+        run: |
+          echo "❌ TestFlight submission failed - check status.expo.dev. The IPA was still attached to the GitHub Release."
+          exit 1
 
   # Android Build (Local - No EAS Minutes Used)
   android-build:
@@ -345,15 +317,16 @@ jobs:
           echo "✅ Android environment configured"
 
       - name: Setup RevenueCat .env
+        env:
+          REVENUECAT_API_KEY: ${{ secrets.REVENUECAT_API_KEY }}
         run: |
-          echo "🔐 Setting up RevenueCat API key..."
-
-          if [ -z "${{ secrets.REVENUECAT_API_KEY }}" ]; then
+          set +x
+          if [ -z "$REVENUECAT_API_KEY" ]; then
             echo "❌ ERROR: REVENUECAT_API_KEY secret is not set!"
             exit 1
           fi
-
-          echo "REVENUECAT_API_KEY=${{ secrets.REVENUECAT_API_KEY }}" > .env
+          echo "::add-mask::$REVENUECAT_API_KEY"
+          printf 'REVENUECAT_API_KEY=%s\n' "$REVENUECAT_API_KEY" > .env
           echo "✅ .env created"
 
       - name: Verify google-services.json
