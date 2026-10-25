@@ -101,6 +101,8 @@ jobs:
     runs-on: xcode-27
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.1.0.app/Contents/Developer
+      EXPO_APPLE_TEAM_ID: D4N62PJYTF
+      EXPO_APPLE_TEAM_TYPE: INDIVIDUAL
     needs: quality-checks
     defaults:
       run:
