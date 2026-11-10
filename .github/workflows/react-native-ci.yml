@@ -95,6 +95,10 @@ jobs:
   ios-build:
     runs-on: macos-latest
     needs: quality-checks
+    env:
+      # Public Apple team id (signing team of com.ritzakku.velvet). Lets EAS use the
+      # stored App Store Connect API key non-interactively to sync capabilities/profiles.
+      EXPO_APPLE_TEAM_ID: D4N62PJYTF
     defaults:
       run:
         working-directory: private
